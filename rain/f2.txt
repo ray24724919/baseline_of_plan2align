@@ -1,0 +1,1 @@
+Consider the following source text (Source) and its translation (Translation). Determine if the translation is accurate. Translations that deviate from the objective meaning of the source text, introduce speculative content, or alter the intended meaning are considered inaccurate.

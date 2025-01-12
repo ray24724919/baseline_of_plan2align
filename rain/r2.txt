@@ -1,0 +1,4 @@
+Options:
+(A) The translation is inaccurate.
+(B) The translation is accurate.[/INST]
+The evaluation is: (
