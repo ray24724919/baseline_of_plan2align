@@ -1,26 +1,29 @@
-# coding=utf-8
 import argparse
-import time
+import os
 
 parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--start', type=int, default=100)
-parser.add_argument('--end', type=int, default=150)
+parser.add_argument('--start', type=int, default=0)
+parser.add_argument('--end', type=int, default=100)
 parser.add_argument('--index', type=int, default=0)
-parser.add_argument('--gpu_index', type=int, nargs='+', default=[2,3])
-parser.add_argument('--outdir', type=str, default='translation/0106')
+parser.add_argument('--gpu_index', type=int, nargs='+', default=[2])
+parser.add_argument('--outdir', type=str, default='rain/run_outs_en_context')
 parser.add_argument('--modelname', type=str, default='meta-llama/Meta-Llama-3.1-8B-Instruct')
+parser.add_argument('--dataset', type=str, default='/home/raychen/20240729/datasets/windows_gemma2_zh-en.csv')
+parser.add_argument('--language', type=str, default='en')
+parser.add_argument('--type', type=str, default='context') # paragraph, context
 
 args = parser.parse_args()
+
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
 maxlen = 1024
 maxT = 12
 minT = 6
 Vt = 0.8
+
 import copy
 import json
-import os
 import random
-
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -36,7 +39,6 @@ from transformers.generation.logits_process import (
     TopPLogitsWarper,
 )
 from sentence_transformers import SentenceTransformer
-
 import pandas as pd
 
 
@@ -57,7 +59,6 @@ set_seed(0)
 
 from nodes import node
 
-
 def save_dict(dict_input, filename):
     print('save_dict')
     if os.path.exists(filename):
@@ -70,7 +71,6 @@ def save_dict(dict_input, filename):
     with open(filename, 'w') as file:
         json.dump(dict_merged, file, ensure_ascii=False)
 
-
 def find_all_indices(text, substring):
     indices = []
     start_index = 0
@@ -82,14 +82,13 @@ def find_all_indices(text, substring):
         start_index = index + 1
     return indices
 
-
-with open('translation/f2.txt') as f:
+with open('rain/f2.txt') as f:
         fsred = f.read()
 
-with open('translation/r1.txt') as f:
+with open('rain/r1.txt') as f:
     redA = f.read()
 
-with open('translation/r2.txt') as f:
+with open('rain/r2.txt') as f:
     redB = f.read()
 
 outdir = args.outdir
@@ -103,74 +102,81 @@ except:
     res = []
     qs = []
 
-
 def build_dataset_rank(
         tokenizer, split="train",
         select=None,
 ):
-    ds = load_dataset('csv', data_files='/home/raychen/20240729_llama/datasets/wmt24_zh_en_split_train.csv')['train']
+    ds = load_dataset('csv', data_files=args.dataset)['train']
 
     def remove_columns(example):
-        for feat in ['BOOK_ID','CHAPTER_ID','PARAGRAPH_ID']:
-            example.pop(feat)
+        if args.type == 'context':
+            for feat in ['PARAGRAPH_ID','index',args.language,'gemma2']:
+                example.pop(feat)
+        if args.type == 'paragraph':
+            for feat in ['ref', 'good_mt', 'bad_mt', 'good_model', 'bad_model']:
+                example.pop(feat)
         return example
     
-    system_prompt = "你是一個非常有經驗且成功的譯者，你的任務是將以下給定的文章翻譯成繁體中文，並且只輸出翻譯結果:\n"
-    system_prompt_back = "翻譯結果:"
+    language_map = {'en': 'English', 'de': 'German', 'ru': 'Russian'}
+    language = language_map.get(args.language, '')
+        
+    system_prompt = "You are a helpful translator and only output the result.\n"
+    system_prompt_back = f"Translate this from Chinese to {language}:\n"
 
     def modify_entries(example):
-        current_prompt = system_prompt + str(example['en']).replace('</s>', '') + "\n" + system_prompt_back
-        example['en'] = current_prompt
+        if args.type == 'paragraph':
+            current_prompt = system_prompt + str(example['src']).replace('</s>', '') + "\n" + system_prompt_back
+            example['src'] = current_prompt
+        elif args.type == 'context':
+            current_prompt = system_prompt + str(example['zh']).replace('</s>', '') + "\n" + system_prompt_back
+            example['zh'] = current_prompt
         return example
 
     ds = ds.map(modify_entries)
 
     ds = ds.map(remove_columns)
-    
-    # ds = ds.shuffle(seed=42)
+
     ds1 = ds.select(range(args.start, args.end))
-    # ds1 = ds.select(range(100,200))
-    # dst=ds.select(range(200,300))
-    # ds2=ds.select(range(300,len(ds)))
     original_columns1 = ds1.column_names
-    # original_columns2 = ds2.column_names
-    num_proc = 24
 
     def preprocess_function(examples):
         new_examples = {
             "query": [],
             "input_ids": [],
             "queryf": [],
-            'best_answer':[]
         }
-        for i in range(len(examples['en'])):
-            transcript = str(examples['en'][i]).replace('</s>', '')
-            ref = str(examples['zh'][i]).replace('</s>', '')
-            text = transcript
-            tokenized_question = tokenizer(text, truncation=True)
-            new_examples["input_ids"].append(tokenized_question["input_ids"])
-            # textf = fschat + '\n\nQ: ' + text + '\nA:'
-            textf = text
-            new_examples["query"].append(textf)
-            new_examples["queryf"].append(textf)
-            new_examples["best_answer"].append(ref)
+        if args.type=='paragraph':
+            for i in range(len(examples['src'])):
+                transcript = examples['src'][i]
+                text = transcript
+                tokenized_question = tokenizer(text, truncation=True)
+                new_examples["input_ids"].append(tokenized_question["input_ids"])
+                textf = text
+                new_examples["query"].append(textf)
+                new_examples["queryf"].append(textf)
+        if args.type=='context':
+            for i in range(len(examples['zh'])):
+                transcript = examples['zh'][i]
+                text = transcript
+                tokenized_question = tokenizer(text, truncation=True)
+                new_examples["input_ids"].append(tokenized_question["input_ids"])
+                textf = text
+                new_examples["query"].append(textf)
+                new_examples["queryf"].append(textf)
 
         return new_examples
 
     ds1 = ds1.map(
         preprocess_function,
         batched=True,
-        # num_proc=num_proc,
         remove_columns=original_columns1,
         load_from_cache_file=False
     )
 
-    ds1 = ds1.filter(lambda x: len(x["input_ids"]) < 512, batched=False)
-
+    # ds1 = ds1.filter(lambda x: len(x["input_ids"]) < 512, batched=False)
     ds1.set_format(type="torch")
 
     return ds1
-
 
 if not os.path.exists(outdir):
     os.makedirs(outdir)
@@ -190,7 +196,6 @@ encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2').cuda()
 testdataset = build_dataset_rank(tokenizer)
 testloader = DataLoader(testdataset, batch_size=1, shuffle=False)
 
-
 @torch.no_grad()
 def genc(s, model, tokenizer):
     '''
@@ -201,7 +206,6 @@ def genc(s, model, tokenizer):
     outs = model.generate(inputs=input_ids.cuda(), max_length=maxlen, use_cache=False, eos_token_id=terminators)
     outstr = tokenizer.decode(outs[0], skip_special_tokens=True)
     return outstr
-
 
 model.eval()
 
@@ -220,9 +224,6 @@ def getv(getoken, model, tokenizer, dic, dicp, maxlen):
         text = text[:inds[1]]
     text = text.replace('[INST] ', 'Q: ')
     text = text.replace(' [/INST] ', '\nA:')
-    # text = text.replace('[INST] ', "你是一個非常有經驗且成功的譯者，你的任務是將以下給定的文章翻譯成繁體中文，並且只輸出翻譯結果:\n")
-    # text = text.replace(' [/INST] ', "\n翻譯結果:")
-    
 
     text = remove_after_last_period(text)
     text = text.strip()
@@ -270,7 +271,6 @@ def simg(dicp, orstate, model, tokenizer, maxlen):
             break
     tmpstr = tokenizer.decode(state, skip_special_tokens=True)
     return tmpstr, state
-
 
 def prepare_logits_processor(
         temperature: float, repetition_penalty: float, top_p: float, top_k: int
@@ -324,8 +324,6 @@ def getp(state, model, dicp, topk=-1, topp=1.0, temperature=1.0, repetition_pena
         return probs, past_key_values
     return probs
 
-
-
 @torch.no_grad()
 def group_getp(state, model, dicp, topk=10, maxnew=10):
     '''
@@ -357,7 +355,6 @@ def group_getp(state, model, dicp, topk=10, maxnew=10):
         greedytmpstate.append(greedytoken)
     outsset.append(greedytmptokens)
 
-
     for _ in range(topk - 1):
         tmpstate = copy.deepcopy(state)
         tmplog = torch.tensor(0.0)
@@ -378,8 +375,6 @@ def group_getp(state, model, dicp, topk=10, maxnew=10):
         if len(outs) >= topk - 1:
             break
 
-
-
     greedytmpp = torch.exp(greedytmplog)
     if len(etmpp)>0:
         etmpp=np.array(etmpp)
@@ -390,7 +385,6 @@ def group_getp(state, model, dicp, topk=10, maxnew=10):
     outs = [(greedytmptokens, greedytmpp)] + outs
 
     return outs
-
 
 def node2dic(node, state, tokenizer):
     d = {}
@@ -403,7 +397,6 @@ def node2dic(node, state, tokenizer):
         dd[actstr] = (n, q)
     d[tmpstr] = dd
     return d
-
 
 def getmaxnew(step):
     '''
@@ -475,9 +468,7 @@ def gmeval(batch, model, tokenizer):
     query = batch['query'][0]
     query = "[INST] " + query + " [/INST] "
     # answer = batch['input_ids'][0]
-    best_answer=batch['best_answer'][0]
     # source=batch['source'][0]
-
 
     if query in qs:
         return None
@@ -536,25 +527,13 @@ def gmeval(batch, model, tokenizer):
             break
 
     raina = tokenizer.decode(state, skip_special_tokens=True)
-    raina= raina.replace('[INST] ', 'Q: ')
-    raina = raina.replace(' [/INST] ', '\nA:')
-    # raina= raina.replace('[INST] ', "你是一個非常有經驗且成功的譯者，你的任務是將以下給定的文章翻譯成繁體中文，並且只輸出翻譯結果:\n")
-    # raina = raina.replace(' [/INST] ', "\n翻譯結果:")
+    q = batch['query'][0]
+    raina= raina.replace('[INST]', '')
+    raina = raina.replace('[/INST]', '')
+    raina = raina.replace('q', '')
     raina = raina.strip()
 
-
-
-    # pa = genc(query, model, tokenizer)
-    # pa = pa.replace('[INST] ', 'Q: ')
-    # pa = pa.replace(' [/INST] ', '\nA:')
-    # # pa = pa.replace('[INST] ', "你是一個非常有經驗且成功的譯者，你的任務是將以下給定的文章翻譯成繁體中文，並且只輸出翻譯結果:\n")
-    # # pa = pa.replace(' [/INST] ', "\n翻譯結果:")
-    # pa = pa.strip()
-
-
-
-
-    tmp = {'question': query, 'raina': raina, 'best_answer':best_answer}  # ,'source':source, 'pa': pa,
+    tmp = {'question': query, 'raina': raina}  # ,'source':source, 'pa': pa,
     save_dict(dic, '{}_dicv/res_{}.json'.format(outdir, args.index))
     return tmp
 
@@ -564,7 +543,6 @@ terminators = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id
 def increment():
     global call
     call += 1
-
 
 for epoch_test, batch_test in tqdm(enumerate(testloader)):
     call = 0
