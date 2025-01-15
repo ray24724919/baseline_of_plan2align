@@ -1,25 +1,5 @@
 import argparse
 import os
-
-parser = argparse.ArgumentParser(description='sp')
-parser.add_argument('--start', type=int, default=0)
-parser.add_argument('--end', type=int, default=100)
-parser.add_argument('--index', type=int, default=0)
-parser.add_argument('--gpu_index', type=int, nargs='+', default=[2])
-parser.add_argument('--outdir', type=str, default='rain/run_outs_en_context')
-parser.add_argument('--modelname', type=str, default='meta-llama/Meta-Llama-3.1-8B-Instruct')
-parser.add_argument('--dataset', type=str, default='/home/raychen/20240729/datasets/windows_gemma2_zh-en.csv')
-parser.add_argument('--language', type=str, default='en')
-parser.add_argument('--type', type=str, default='context') # paragraph, context
-
-args = parser.parse_args()
-
-os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
-maxlen = 1024
-maxT = 12
-minT = 6
-Vt = 0.8
-
 import copy
 import json
 import random
@@ -41,6 +21,25 @@ from transformers.generation.logits_process import (
 from sentence_transformers import SentenceTransformer
 import pandas as pd
 
+parser = argparse.ArgumentParser(description='sp')
+parser.add_argument('--modelname', type=str, default='meta-llama/Meta-Llama-3.1-8B-Instruct')
+parser.add_argument('--gpu_index', type=int, nargs='+', default=[2])
+parser.add_argument('--start', type=int, default=0)
+parser.add_argument('--end', type=int, default=100)
+parser.add_argument('--dataset', type=str, default='/home/raychen/20240729/datasets/zh_en_train_llama3_gemma2.csv')
+parser.add_argument('--language', type=str, choices=['en', 'de', 'ru'], default='en')
+parser.add_argument('--type', type=str, choices=['paragraph', 'context'], default='paragraph')
+parser.add_argument('--index', type=int, default=0)
+parser.add_argument('--outdir', type=str, default='rain/run_outs')
+args = parser.parse_args()
+
+print(f"{args=}")
+
+os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
+maxlen = 1024
+maxT = 12
+minT = 6
+Vt = 0.8
 
 def set_seed(seed):
     """
@@ -53,7 +52,6 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
 
 set_seed(0)
 
@@ -83,7 +81,7 @@ def find_all_indices(text, substring):
     return indices
 
 with open('rain/f2.txt') as f:
-        fsred = f.read()
+    fsred = f.read()
 
 with open('rain/r1.txt') as f:
     redA = f.read()
@@ -93,7 +91,7 @@ with open('rain/r2.txt') as f:
 
 outdir = args.outdir
 try:
-    with open('{}/res_{}.json'.format(outdir, args.index), encoding='utf-8') as f:
+    with open('{}/res_{}_zh-{}_{}.json'.format(outdir, args.index, args.language, args.type), encoding='utf-8') as f:
         res = json.loads(f.read())
     qs = []
     for i in res:
@@ -107,86 +105,53 @@ def build_dataset_rank(
         select=None,
 ):
     ds = load_dataset('csv', data_files=args.dataset)['train']
-
-    def remove_columns(example):
-        if args.type == 'context':
-            for feat in ['PARAGRAPH_ID','index',args.language,'gemma2']:
-                example.pop(feat)
-        if args.type == 'paragraph':
-            for feat in ['ref', 'good_mt', 'bad_mt', 'good_model', 'bad_model']:
-                example.pop(feat)
-        return example
+    columns_to_keep = {'zh'}
+    columns_to_remove = set(ds.column_names) - columns_to_keep
+    ds = ds.remove_columns(list(columns_to_remove))
     
     language_map = {'en': 'English', 'de': 'German', 'ru': 'Russian'}
     language = language_map.get(args.language, '')
-        
-    system_prompt = "You are a helpful translator and only output the result.\n"
-    system_prompt_back = f"Translate this from Chinese to {language}:\n"
+    system_prompt = [{"role": "system", "content": f"You are a helpful translator and only output the result. Translate this from Chinese to {language}:\n "}]
 
-    def modify_entries(example):
-        if args.type == 'paragraph':
-            current_prompt = system_prompt + str(example['src']).replace('</s>', '') + "\n" + system_prompt_back
-            example['src'] = current_prompt
-        elif args.type == 'context':
-            current_prompt = system_prompt + str(example['zh']).replace('</s>', '') + "\n" + system_prompt_back
-            example['zh'] = current_prompt
+    def modify_prompt(example):
+        prompt_text = example['zh'].replace('</s>', '')
+        prompt = [{"role": "user", "content": prompt_text}]
+        example = {'prompt': system_prompt + prompt}
         return example
 
-    ds = ds.map(modify_entries)
-
-    ds = ds.map(remove_columns)
+    ds = ds.map(modify_prompt)
 
     ds1 = ds.select(range(args.start, args.end))
-    original_columns1 = ds1.column_names
-
-    def preprocess_function(examples):
-        new_examples = {
-            "query": [],
-            "input_ids": [],
-            "queryf": [],
+    def tokenize_and_prepare(examples):
+        # if tokenizer.pad_token is None:
+        #     tokenizer.pad_token = tokenizer.eos_token
+        tokenized = tokenizer.apply_chat_template(examples['prompt'], truncation=True, add_generation_prompt=True)
+        # tokenized = tokenizer(examples['prompt'], truncation=True)
+        return {
+            "input_ids": tokenized,
+            # "input_ids": tokenized["input_ids"],
+            "query": examples['prompt'],
+            "queryf": examples['prompt']
         }
-        if args.type=='paragraph':
-            for i in range(len(examples['src'])):
-                transcript = examples['src'][i]
-                text = transcript
-                tokenized_question = tokenizer(text, truncation=True)
-                new_examples["input_ids"].append(tokenized_question["input_ids"])
-                textf = text
-                new_examples["query"].append(textf)
-                new_examples["queryf"].append(textf)
-        if args.type=='context':
-            for i in range(len(examples['zh'])):
-                transcript = examples['zh'][i]
-                text = transcript
-                tokenized_question = tokenizer(text, truncation=True)
-                new_examples["input_ids"].append(tokenized_question["input_ids"])
-                textf = text
-                new_examples["query"].append(textf)
-                new_examples["queryf"].append(textf)
-
-        return new_examples
-
+    
     ds1 = ds1.map(
-        preprocess_function,
+        tokenize_and_prepare,
         batched=True,
-        remove_columns=original_columns1,
+        remove_columns=['prompt','zh'],
         load_from_cache_file=False
     )
 
-    # ds1 = ds1.filter(lambda x: len(x["input_ids"]) < 512, batched=False)
     ds1.set_format(type="torch")
-
     return ds1
 
 if not os.path.exists(outdir):
     os.makedirs(outdir)
 if not os.path.exists('{}_dicv'.format(outdir)):
     os.makedirs('{}_dicv'.format(outdir))
-modelname = args.modelname
-print(modelname)
-tokenizer = AutoTokenizer.from_pretrained(modelname)
+
+tokenizer = AutoTokenizer.from_pretrained(args.modelname)
 model = AutoModelForCausalLM.from_pretrained(
-    modelname,
+    args.modelname,
     # load_in_4bit=True,
     load_in_8bit=True,
     # torch_dtype=torch.float16,
@@ -196,16 +161,16 @@ encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2').cuda()
 testdataset = build_dataset_rank(tokenizer)
 testloader = DataLoader(testdataset, batch_size=1, shuffle=False)
 
-@torch.no_grad()
-def genc(s, model, tokenizer):
-    '''
-    vanilla autoregression
-    '''
-    input_ids = tokenizer(s, return_tensors="pt").input_ids
-    terminators = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id|>")]
-    outs = model.generate(inputs=input_ids.cuda(), max_length=maxlen, use_cache=False, eos_token_id=terminators)
-    outstr = tokenizer.decode(outs[0], skip_special_tokens=True)
-    return outstr
+# @torch.no_grad()
+# def genc(s, model, tokenizer):
+#     '''
+#     vanilla autoregression
+#     '''
+#     input_ids = tokenizer(s, return_tensors="pt").input_ids
+#     terminators = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id|>")]
+#     outs = model.generate(inputs=input_ids.cuda(), max_length=maxlen, use_cache=False, eos_token_id=terminators)
+#     outstr = tokenizer.decode(outs[0], skip_special_tokens=True)
+#     return outstr
 
 model.eval()
 
@@ -228,7 +193,6 @@ def getv(getoken, model, tokenizer, dic, dicp, maxlen):
     text = remove_after_last_period(text)
     text = text.strip()
 
-    # 問翻得如何
     if text not in dic:
         text = "[INST] " + fsred + '\n\n' + text + '\n\n' +'Is the translations accurate? [\INST] '
         input_ids = tokenizer(text, return_tensors="pt").input_ids
@@ -498,7 +462,7 @@ def gmeval(batch, model, tokenizer):
 
             move = root.get_max_n_action()
             rootd = node2dic(root, state, tokenizer)
-            save_dict(rootd, '{}_dicv/res_root_{}.json'.format(outdir, args.index))
+            save_dict(rootd, '{}_dicv/res_root_{}_zh-{}_{}.json'.format(outdir, args.index, args.language, args.type))
 
             move=slice_until_2(move)
             state.extend(move)
@@ -534,7 +498,7 @@ def gmeval(batch, model, tokenizer):
     raina = raina.strip()
 
     tmp = {'question': query, 'raina': raina}  # ,'source':source, 'pa': pa,
-    save_dict(dic, '{}_dicv/res_{}.json'.format(outdir, args.index))
+    save_dict(dic, '{}_dicv/res_{}_zh-{}_{}.json'.format(outdir, args.index, args.language, args.type))
     return tmp
 
 
@@ -544,7 +508,7 @@ def increment():
     global call
     call += 1
 
-for epoch_test, batch_test in tqdm(enumerate(testloader)):
+for epoch_test, batch_test in tqdm(enumerate(testloader), total=len(testloader)):
     call = 0
     start = time.time()
     tmp= gmeval(batch_test, model, tokenizer)
@@ -555,5 +519,5 @@ for epoch_test, batch_test in tqdm(enumerate(testloader)):
         tmp['call'] = call
         # {'question': query, 'raina': raina, 'best_answer':best_answer, 'time':elapsed, 'call': call}
     print('-------------------------finish one-------------------------')
-    with open(f'{outdir}/res_{args.index}.json', 'w', encoding='utf-8') as f:
+    with open(f'{outdir}/res_{args.index}_zh-{args.language}_{args.type}.json', 'w', encoding='utf-8') as f:
         f.write(json.dumps(res, ensure_ascii=False))
