@@ -11,9 +11,9 @@ import torch
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--llm", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct")
-parser.add_argument("--rm", type=str, default="Unbabel/wmt22-comet-da")
-parser.add_argument("--llm_gpu", type=str, default="cuda:3")
-parser.add_argument("--rm_gpu", type=str, default="cuda:3")
+parser.add_argument("--rm", type=str, default="metricx24") # "Unbabel/wmt22-comet-da"
+parser.add_argument("--llm_gpu", type=str, default="cuda:0")
+parser.add_argument("--rm_gpu", type=str, default="cuda:0")
 parser.add_argument("--start", type=int, default=0)
 parser.add_argument('--end', type=int, default=100)
 parser.add_argument("--dataset", type=str, default='/home/raychen/20240729/datasets/zh_en_train_llama3_gemma2.csv')
@@ -41,7 +41,7 @@ if not cfg_path.exists():
     print("ERROR: Config doesn't exist!")
     exit(1)
     
-out_path = Path(args.out_file + f"_0.jsonl")
+out_path = Path(args.out_file + f"/0_zh-{args.language}_{args.type}.jsonl")
 if out_path.exists() and (not args.recover):
     print("ERROR: out_path already exists!")
     exit(1)
@@ -76,7 +76,8 @@ src = test_ds['zh'].replace('</s>', '')
 ref = test_ds[args.language].replace('</s>', '')
 
 truncated_ds = []
-for i in range(args.start, args.end_idx):
+# for i in range(args.start, args.end_idx):
+for i in range(len(test_ds)):
     truncated_ds.append([src[i],ref[i]])
 print(f"{len(truncated_ds)=}")
 
@@ -97,9 +98,9 @@ for config_num, run_config in enumerate(run_configs):
     print(f"[INFO]: Running config: {run_config=}")
 
     data = []
-    if args.recover and Path(args.out_file + f"_{config_num}.jsonl").exists():
+    if args.recover and Path(args.out_file + f"/{config_num}_zh-{args.language}_{args.type}.jsonl").exists():
         print(f"[INFO]: Run already exists, checking if it's done")
-        resfile = open(Path(args.out_file + f"_{config_num}_zh-{args.language}_{args.type}.jsonl"))
+        resfile = open(Path(args.out_file + f"/{config_num}_zh-{args.language}_{args.type}.jsonl"))
         samples = resfile.readlines()
 
         if samples[-1] != "":
@@ -137,5 +138,5 @@ for config_num, run_config in enumerate(run_configs):
         data.append({"prompt": current_prompt, "result": res, "elapsed":elapsed,"call": call}) # , "method": args.out_file + f"_{config_num}"
         print(data)
         print(f"[DEBUG]: {elapsed=} {len(current_prompt)=} {current_prompt=}, {res=}")
-        with open(Path(args.out_file + f"_{config_num}_zh-{args.language}_{args.type}.jsonl"), "w") as outfile:
+        with open(Path(args.out_file + f"/{config_num}_zh-{args.language}_{args.type}.jsonl"), "w") as outfile:
             json.dump(data, outfile, ensure_ascii=False)

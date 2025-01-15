@@ -100,10 +100,7 @@ except:
     res = []
     qs = []
 
-def build_dataset_rank(
-        tokenizer, split="train",
-        select=None,
-):
+def build_dataset_rank(tokenizer):
     ds = load_dataset('csv', data_files=args.dataset)['train']
     columns_to_keep = {'zh'}
     columns_to_remove = set(ds.column_names) - columns_to_keep
@@ -111,38 +108,39 @@ def build_dataset_rank(
     
     language_map = {'en': 'English', 'de': 'German', 'ru': 'Russian'}
     language = language_map.get(args.language, '')
-    system_prompt = [{"role": "system", "content": f"You are a helpful translator and only output the result. Translate this from Chinese to {language}:\n "}]
+    system_prompt = f"You are a helpful translator and only output the result. Translate this from Chinese to {language}:\n "
+    system_prompt_back = "Translation result:"
 
     def modify_prompt(example):
         prompt_text = example['zh'].replace('</s>', '')
-        prompt = [{"role": "user", "content": prompt_text}]
+        prompt = system_prompt + prompt_text + "\n" + system_prompt_back
         example = {'prompt': system_prompt + prompt}
         return example
 
     ds = ds.map(modify_prompt)
 
-    ds1 = ds.select(range(args.start, args.end))
+    # ds = ds.select(range(args.start, args.end))
     def tokenize_and_prepare(examples):
         # if tokenizer.pad_token is None:
         #     tokenizer.pad_token = tokenizer.eos_token
-        tokenized = tokenizer.apply_chat_template(examples['prompt'], truncation=True, add_generation_prompt=True)
-        # tokenized = tokenizer(examples['prompt'], truncation=True)
+        # tokenized = tokenizer.apply_chat_template(examples['prompt'], truncation=True, add_generation_prompt=True)
+        tokenized = tokenizer(examples['prompt'], truncation=True)
         return {
-            "input_ids": tokenized,
-            # "input_ids": tokenized["input_ids"],
+            # "input_ids": tokenized,
+            "input_ids": tokenized["input_ids"],
             "query": examples['prompt'],
             "queryf": examples['prompt']
         }
     
-    ds1 = ds1.map(
+    ds = ds.map(
         tokenize_and_prepare,
         batched=True,
         remove_columns=['prompt','zh'],
         load_from_cache_file=False
     )
 
-    ds1.set_format(type="torch")
-    return ds1
+    ds.set_format(type="torch")
+    return ds
 
 if not os.path.exists(outdir):
     os.makedirs(outdir)

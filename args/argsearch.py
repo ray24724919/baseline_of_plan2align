@@ -2,6 +2,8 @@ from typing import List
 import torch
 from torch.nn import functional as F
 from tqdm import tqdm
+import subprocess
+import json
 
 # import the huggingface transformers libraries
 import transformers
@@ -56,11 +58,49 @@ class ARGS:
         self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
         
         print("Loading RM...")
-        xcomet_model_path = download_model("Unbabel/wmt22-comet-da")
-        self.RM = load_from_checkpoint(xcomet_model_path).to(self.rm_dev)
+        if rm_path=='metricx24':
+            print('metricx')
+        else:
+            xcomet_model_path = download_model(rm_path)
+            self.RM = load_from_checkpoint(xcomet_model_path).to(self.rm_dev)
         # self.RM = AutoModelForSequenceClassification.from_pretrained(rm_path, num_labels=1, torch_dtype=torch_dtype).to(self.rm_dev)
         # self.RM.eval()
-        self.call = 0
+    def get_entry(self, src, mt):
+        entry = {"source": src.replace('</s>', '')}
+        entry["hypothesis"] = mt
+        entry["reference"] = ""
+        return entry
+
+    def write_jsonl(self, src, mts):
+        with open(f'/home/raychen/20240729/baseline_acl2025/args/json_for_metricx/input.jsonl', 'w', encoding='utf-8') as output_file:
+            for mt in mts:
+                entry = self.get_entry(src, mt)
+                output_file.write(json.dumps(entry, ensure_ascii=False) + '\n')
+                
+    def run_command(self):
+        json_path ='/home/raychen/20240729/baseline_acl2025/args/json_for_metricx/'
+        devices_map = {'cuda:0':0,'cuda:1':1,'cuda:2':2,'cuda:3':3}
+        command = [
+            "python", "-m", "metricx24.predict",
+            "--tokenizer", "google/mt5-xl",
+            "--model_name_or_path", "google/metricx-24-hybrid-xl-v2p6",
+            "--max_input_length", "1536",
+            "--batch_size", "1",
+            "--input_file", f"{json_path}/input.jsonl",
+            "--output_file", f"{json_path}/output.jsonl",
+            "--device", f"{devices_map.get(self.rm_dev, 0)}",
+            "--qe"
+        ]
+        subprocess.run(command)
+
+    def get_predict(self):
+        scores = []
+        with open('/home/raychen/20240729/baseline_acl2025/args/json_for_metricx/output.jsonl', 'r', encoding='utf-8') as new:
+            for line in new:
+                entry = json.loads(line)
+                score = entry.get('prediction', None)
+                scores.append(score)
+        return scores
     
     def calculate_xcomet_score(self, data):
         # data = [{'src':src,'mt':answer,'ref':ref} for answer in answers]
@@ -69,7 +109,7 @@ class ARGS:
         scores = [model_output[0][i] for i in range(len(data))]
         return scores
 
-    def generate_greedy_step_large(self, initial_len, src, ref, mout, input_ids, pre_screen_beam_width=10, weight=0., rm_cached=None, chunk_size=5, debug=True, _use_cache=True):
+    def generate_greedy_step_large(self, initial_len, src, ref, mout, input_ids, pre_screen_beam_width=10, weight=0., rm_cached=None, chunk_size=10, debug=True, _use_cache=True):
         out_logits = mout.logits[:, -1] # out_logits=能夠生成的token的分數
 
         # top-k 分數及其 index
@@ -95,9 +135,13 @@ class ARGS:
             decoded_texts = [self.tokenizer.decode(c[initial_len:], skip_special_tokens=True) for c in chunk]
             # decoded_texts = [self.tokenizer.decode(c, skip_special_tokens=True) for c in chunk]
             # print(decoded_texts[0])
-            data = [{'src':src, 'mt':decoded_text, 'ref':ref} for decoded_text in decoded_texts]
-            rewards = self.calculate_xcomet_score(data)
-            print(f'{len(data)}')
+            self.write_jsonl(src,decoded_texts)
+            self.run_command()
+            rewards_ = self.get_predict()
+            rewards = [1 - x / 25 for x in rewards_]
+            # data = [{'src':src, 'mt':decoded_text, 'ref':ref} for decoded_text in decoded_texts]
+            # rewards = self.calculate_xcomet_score(data)
+            print(f'{len(decoded_texts)=}')
             print(f"{rewards=}")
 
             # rm_out = self.RM(**self.LLM.prepare_inputs_for_generation(input_ids=chunk, attention_mask=create_attention_mask(chunk.shape[1], chunk.shape[0]).to(self.rm_dev), past_key_values=pkv, use_cache=True))
@@ -125,7 +169,7 @@ class ARGS:
         
         return current_best_tokens.to(self.llm_dev)#, new_rm_cached
     
-    def generate(self, src, ref, prompt, weight=0., topk=10, max_new_token=128, method="greedy", temperature=0.7, chunk_size=5, debug=False):
+    def generate(self, src, ref, prompt, weight=0., topk=10, max_new_token=128, method="greedy", temperature=0.7, chunk_size=10, debug=False):
         call = 0
         tokens = self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_tensors="pt").to(self.llm_dev)
         terminators = [self.tokenizer.eos_token_id, self.tokenizer.convert_tokens_to_ids("<|eot_id|>")]
