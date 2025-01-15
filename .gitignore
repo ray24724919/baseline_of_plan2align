@@ -3,3 +3,4 @@ rain/__pycache__/
 args/json_for_metricx/
 simpo_out/
 __pycache__/
+*.pyc
