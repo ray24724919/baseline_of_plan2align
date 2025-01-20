@@ -139,7 +139,7 @@ def main() -> None:
   os.environ['NCCL_IB_DISABLE'] = "1"
 
   if torch.cuda.is_available():
-    device = torch.device(f"cuda:{args.device}")
+    device = torch.device(f"cuda:0")
     per_device_batch_size = args.batch_size // torch.cuda.device_count()
   else:
     device = torch.device("cpu")

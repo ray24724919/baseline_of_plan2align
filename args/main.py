@@ -12,12 +12,11 @@ import torch
 parser = argparse.ArgumentParser()
 parser.add_argument("--llm", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct")
 parser.add_argument("--rm", type=str, default="metricx24") # "Unbabel/wmt22-comet-da"
-parser.add_argument("--llm_gpu", type=str, default="cuda:0")
+parser.add_argument('-d',"--llm_gpu", type=str, default="cuda:0")
 parser.add_argument("--rm_gpu", type=str, default="cuda:0")
-parser.add_argument("--start", type=int, default=0)
-parser.add_argument('--end', type=int, default=100)
-parser.add_argument("--dataset", type=str, default='/home/raychen/20240729/datasets/zh_en_train_llama3_gemma2.csv')
-parser.add_argument("--language", type=str, choices=['en', 'de', 'ru'], default='en')
+# parser.add_argument("--start", type=int, default=0)
+# parser.add_argument('--end', type=int, default=100)
+parser.add_argument('-l',"--language", type=str, choices=['en', 'de', 'ru'], default='en')
 parser.add_argument('--type', type=str, choices=['paragraph', 'context'], default='paragraph')
 parser.add_argument("--max_new_token", type=int, default=1024)
 parser.add_argument("--recover", action='store_true', default = False)
@@ -26,6 +25,8 @@ parser.add_argument("--out_file", type=str, default="args/run_outs")
 args = parser.parse_args()
 
 print(f"{args=}")
+dataset = f'/home/raychen/20241202/acl_datasets/validation/{args.type}/acl2025_validation_zh-{args.language}_{args.type}.csv'
+
 
 if args.recover:
     print("[INFO]: LOOKS LIKE YOU WANT TO RECOVER SOME RESULTS,")
@@ -71,7 +72,7 @@ for run_config in run_configs:
 print(f"[INFO]: Loaded {len(run_configs)} run configs.")
 print(f"[DEBUG]: {run_configs=}")
 
-test_ds = pd.read_csv(args.dataset)
+test_ds = pd.read_csv(dataset)
 src = test_ds['zh'].replace('</s>', '')
 ref = test_ds[args.language].replace('</s>', '')
 
@@ -82,7 +83,7 @@ for i in range(len(test_ds)):
 print(f"{len(truncated_ds)=}")
 
 print(f"[INFO]: Loading models ({args.llm=}, {args.rm=})")
-search = ARGS(llm_path=args.llm, rm_path=args.rm, llm_dev=args.llm_gpu, rm_dev=args.rm_gpu)
+search = ARGS(llm_path=args.llm, rm_path=args.rm, llm_dev=args.llm_gpu, rm_dev=args.rm_gpu, language=args.language)
 print(f"[INFO]: Done")
 
 def runprompt(src, ref, prompt: str, rm_weight=0., topk=5, new_token=24, mode="p_sigmoid_mixing", sample_temp=None, llm_dev:str="cuda:0") -> str:

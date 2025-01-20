@@ -4,6 +4,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 import subprocess
 import json
+import os
 
 # import the huggingface transformers libraries
 import transformers
@@ -44,7 +45,7 @@ def even_chunk(data, chunk_size=10):
 
 # reward based search
 class ARGS:
-    def __init__(self, llm_path, rm_path, llm_dev="cuda:0", rm_dev="cuda:1", torch_dtype=torch.bfloat16): #torch_dtype=torch.float16
+    def __init__(self, llm_path, rm_path, llm_dev="cuda:0", rm_dev="cuda:1", torch_dtype=torch.bfloat16, language='en'): #torch_dtype=torch.float16
         self.llm_dev = llm_dev
         self.rm_dev = rm_dev
         print("Loading LLM...")
@@ -65,6 +66,8 @@ class ARGS:
             self.RM = load_from_checkpoint(xcomet_model_path).to(self.rm_dev)
         # self.RM = AutoModelForSequenceClassification.from_pretrained(rm_path, num_labels=1, torch_dtype=torch_dtype).to(self.rm_dev)
         # self.RM.eval()
+        self.language = language
+        self.json_path = os.getcwd() + '/args/json_for_metricx/' + language
     def get_entry(self, src, mt):
         entry = {"source": src.replace('</s>', '')}
         entry["hypothesis"] = mt
@@ -72,13 +75,12 @@ class ARGS:
         return entry
 
     def write_jsonl(self, src, mts):
-        with open(f'/home/raychen/20240729/baseline_acl2025/args/json_for_metricx/input.jsonl', 'w', encoding='utf-8') as output_file:
+        with open(f'{self.json_path}/input.jsonl', 'w', encoding='utf-8') as output_file:
             for mt in mts:
                 entry = self.get_entry(src, mt)
                 output_file.write(json.dumps(entry, ensure_ascii=False) + '\n')
                 
     def run_command(self):
-        json_path ='/home/raychen/20240729/baseline_acl2025/args/json_for_metricx/'
         devices_map = {'cuda:0':0,'cuda:1':1,'cuda:2':2,'cuda:3':3}
         command = [
             "python", "-m", "metricx24.predict",
@@ -86,8 +88,8 @@ class ARGS:
             "--model_name_or_path", "google/metricx-24-hybrid-xl-v2p6",
             "--max_input_length", "1536",
             "--batch_size", "1",
-            "--input_file", f"{json_path}/input.jsonl",
-            "--output_file", f"{json_path}/output.jsonl",
+            "--input_file", f"{self.json_path}/input.jsonl",
+            "--output_file", f"{self.json_path}/output.jsonl",
             "--device", f"{devices_map.get(self.rm_dev, 0)}",
             "--qe"
         ]
@@ -95,7 +97,7 @@ class ARGS:
 
     def get_predict(self):
         scores = []
-        with open('/home/raychen/20240729/baseline_acl2025/args/json_for_metricx/output.jsonl', 'r', encoding='utf-8') as new:
+        with open(f'{self.json_path}/output.jsonl', 'r', encoding='utf-8') as new:
             for line in new:
                 entry = json.loads(line)
                 score = entry.get('prediction', None)
