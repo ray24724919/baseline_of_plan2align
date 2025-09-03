@@ -20,25 +20,23 @@ from transformers.generation.logits_process import (
 )
 from sentence_transformers import SentenceTransformer
 import pandas as pd
+import ast
 
 parser = argparse.ArgumentParser(description='sp')
 parser.add_argument('--modelname', type=str, default='meta-llama/Meta-Llama-3.1-8B-Instruct')
-parser.add_argument('--gpu_index', type=int, nargs='+', default=[2])
-parser.add_argument('--start', type=int, default=0)
-parser.add_argument('--end', type=int, default=100)
-parser.add_argument('--dataset', type=str, default='/home/raychen/20240729/acl_datasets/validation/paragraph/acl2025_validation_zh-ru_paragraph.csv')
-parser.add_argument('--language', type=str, choices=['en', 'de', 'ru'], default='ru')
-parser.add_argument('--type', type=str, choices=['paragraph', 'context'], default='paragraph')
-parser.add_argument('--index', type=int, default=0)
-parser.add_argument('--outdir', type=str, default='rain/run_outs')
+parser.add_argument('-g','--gpu_index', type=int, nargs='+', default=[0])
+parser.add_argument('-s',"--start", type=int, default=0)
+parser.add_argument('-e','--end', type=int, default=100)
+parser.add_argument('-d', '--dataset', type=str, default='/home/raychen/20241202/helpsteer/dataset/helpsteer3_general_test_valid_only.csv')
+parser.add_argument('--outdir', type=str, default='./baseline/rain/run_outs')
 args = parser.parse_args()
 
 print(f"{args=}")
 
 os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)[1:-1]
 maxlen = 1024
-maxT = 12
-minT = 6
+maxT = 20
+minT = 10
 Vt = 0.8
 
 def set_seed(seed):
@@ -80,18 +78,32 @@ def find_all_indices(text, substring):
         start_index = index + 1
     return indices
 
-with open('rain/f2.txt') as f:
+with open('./baseline/rain/f2.txt') as f:
     fsred = f.read()
 
-with open('rain/r1.txt') as f:
+with open('./baseline/rain/r1.txt') as f:
     redA = f.read()
 
-with open('rain/r2.txt') as f:
+with open('./baseline/rain/r2.txt') as f:
     redB = f.read()
 
+
+
 outdir = args.outdir
+df = pd.read_csv(args.dataset)
+# df['prompt'] = df['prompt'].apply(ast.literal_eval)
+
+if args.start == 0 and (args.end == -1 or args.end > len(df)):
+    iterator_obj = range(len(df))
+elif args.end == -1 or args.end > len(df):
+    iterator_obj = range(args.start,len(df))
+else:
+    iterator_obj = range(args.start,args.end)
+print(f"[INFO]: Loaded dataset {args.dataset}, {iterator_obj}")
+# ds = df[iterator_obj.start:iterator_obj.stop]
+
 try:
-    with open('{}/res_{}_zh-{}_{}.json'.format(outdir, args.index, args.language, args.type), encoding='utf-8') as f:
+    with open(f'{outdir}/rain_{iterator_obj.start}-{iterator_obj.stop}.json', encoding='utf-8') as f:
         res = json.loads(f.read())
     qs = []
     for i in res:
@@ -100,42 +112,27 @@ except:
     res = []
     qs = []
 
-def build_dataset_rank(tokenizer):
+def build_dataset_rank(tokenizer, iterator_obj):
     ds = load_dataset('csv', data_files=args.dataset)['train']
-    columns_to_keep = {'zh'}
-    columns_to_remove = set(ds.column_names) - columns_to_keep
-    ds = ds.remove_columns(list(columns_to_remove))
-    
-    language_map = {'en': 'English', 'de': 'German', 'ru': 'Russian'}
-    language = language_map.get(args.language, '')
-    system_prompt = f"You are a helpful translator and only output the result. Translate this from Chinese to {language}:\n "
-    system_prompt_back = "Translation result:"
-
+    ds = ds.select(range(iterator_obj.start,iterator_obj.stop))
     def modify_prompt(example):
-        prompt_text = example['zh'].replace('</s>', '')
-        prompt = system_prompt + prompt_text + "\n" + system_prompt_back
-        example = {'prompt': system_prompt + prompt}
-        return example
-
-    ds = ds.map(modify_prompt)
-
-    # ds = ds.select(range(args.start, args.end))
-    def tokenize_and_prepare(examples):
-        # if tokenizer.pad_token is None:
-        #     tokenizer.pad_token = tokenizer.eos_token
-        # tokenized = tokenizer.apply_chat_template(examples['prompt'], truncation=True, add_generation_prompt=True)
-        tokenized = tokenizer(examples['prompt'], truncation=True)
+        text = ast.literal_eval(example['prompt'])
+        # messages = [{"role": "user",   "content": text}]
+        messages = text
+        encoding = tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False
+        )
         return {
-            # "input_ids": tokenized,
-            "input_ids": tokenized["input_ids"],
-            "query": examples['prompt'],
-            "queryf": examples['prompt']
+            "input_ids": encoding,
+            "query": text,
+            "queryf": text
         }
-    
+
     ds = ds.map(
-        tokenize_and_prepare,
-        batched=True,
-        remove_columns=['prompt','zh'],
+        modify_prompt,
+        remove_columns=['prompt','chosen','rejected'],
         load_from_cache_file=False
     )
 
@@ -147,7 +144,7 @@ if not os.path.exists(outdir):
 if not os.path.exists('{}_dicv'.format(outdir)):
     os.makedirs('{}_dicv'.format(outdir))
 
-tokenizer = AutoTokenizer.from_pretrained(args.modelname)
+tokenizer = AutoTokenizer.from_pretrained(args.modelname, use_fast=False)
 model = AutoModelForCausalLM.from_pretrained(
     args.modelname,
     # load_in_4bit=True,
@@ -156,8 +153,9 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="cuda:0",
 )
 encoder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2').cuda()
-testdataset = build_dataset_rank(tokenizer)
-testloader = DataLoader(testdataset, batch_size=1, shuffle=False)
+testdataset = build_dataset_rank(tokenizer, iterator_obj)
+# print(testdataset[0])
+# testloader = DataLoader(testdataset, batch_size=1, shuffle=False)
 
 # @torch.no_grad()
 # def genc(s, model, tokenizer):
@@ -172,9 +170,6 @@ testloader = DataLoader(testdataset, batch_size=1, shuffle=False)
 
 model.eval()
 
-def remove_after_last_period(s):
-    head, sep, tail = s.rpartition('.')
-    return head+'.' if sep else s
 
 @torch.no_grad()
 def getv(getoken, model, tokenizer, dic, dicp, maxlen):
@@ -182,36 +177,56 @@ def getv(getoken, model, tokenizer, dic, dicp, maxlen):
     score through self-evaluation
     '''
     text, simgstate = simg(dicp, getoken, model, tokenizer, maxlen)
-    inds = find_all_indices(text, '[INST]')
-    if len(inds) > 1:
-        text = text[:inds[1]]
-    text = text.replace('[INST] ', 'Q: ')
-    text = text.replace(' [/INST] ', '\nA:')
-
-    text = remove_after_last_period(text)
-    text = text.strip()
-
+    inds = find_all_indices(text, 'Human:')
+    if len(inds) > 5:
+        text = text[inds[4] : inds[5]]
+    # 如果只有 5~6 之間（len == 5）的出現，就用第 4 號之後到結尾
+    elif len(inds) > 4:
+        text = text[inds[4] :]
     if text not in dic:
-        text = "[INST] " + fsred + '\n\n' + text + '\n\n' +'Is the translations accurate? [\INST] '
-        input_ids = tokenizer(text, return_tensors="pt").input_ids
+        textA_msg = [
+            {"role":"system","content":fsred},
+            {"role":"assistant","content":text},
+            {"role":"user","content":redA}
+        ]
+        input_ids = tokenizer.apply_chat_template(
+            textA_msg, return_tensors="pt"
+        )
+        textB_msg = [
+            {"role":"system","content":fsred},
+            {"role":"assistant","content":text},
+            {"role":"user","content":redB}
+        ]
+        
         outs = model(input_ids.cuda())
-        increment()
         logits = outs.logits
         last_token_logits = logits[0, -1, :]
         prob = F.softmax(last_token_logits.float(), dim=0)
-        p_A = max(prob[3869].item(), prob[8241].item())
-        p_B = max(prob[1939].item(), prob[3782].item())
+        p_A = prob[29909].item()  # prob of 'A'
+        p_B = prob[29933].item()  # prob of 'B'
         if p_A > p_B:
             A = 1
         else:
             A = 0
-        v = A
+        input_ids = tokenizer.apply_chat_template(
+            textB_msg, return_tensors="pt"
+        )
+        outs = model(input_ids.cuda())
+        logits = outs.logits
+        last_token_logits = logits[0, -1, :]
+        prob = F.softmax(last_token_logits.float(), dim=0)
+        p_A = prob[29909].item()
+        p_B = prob[29933].item()
+        if p_B > p_A:
+            B = 1
+        else:
+            B = 0
+        v = (A + B) / 2
         v = (v - 0.5) * 2
         dic[text] = v
     else:
         v = dic[text]
     return v, simgstate, len(simgstate) - len(getoken)
-
 
 @torch.no_grad()
 def simg(dicp, orstate, model, tokenizer, maxlen):
@@ -224,6 +239,13 @@ def simg(dicp, orstate, model, tokenizer, maxlen):
         if len(state) > maxlen:
             break
         if terminators[0] or terminators[1] in state:
+            break
+        tmpstr = tokenizer.decode(state, skip_special_tokens=True)
+        if tmpstr[-1] == ',' or tmpstr[-1] == '.' or tmpstr[-1] == '?' or tmpstr[-1] == ':' or tmpstr[
+            -1] == ';' or tmpstr[-1] == '\n':
+            break
+        inds = find_all_indices(tmpstr, 'Human:')
+        if len(inds) > 1 + 4:
             break
         probs, past_key_values = getp(state, model, dicp, topk=-1, return_past_key_values=True,
                                       past_key_values=past_key_values)
@@ -372,14 +394,6 @@ def getmaxnew(step):
         return 4
     return 10
 
-def slice_until_2(tup):
-    result = []
-    for item in tup:
-        result.append(item)
-        if item == 2:
-            break
-    return tuple(result)
-
 @torch.no_grad()
 def search(root, state, model, tokenizer, dic, dicp, maxlen=1024):
     state = copy.deepcopy(state)
@@ -395,9 +409,11 @@ def search(root, state, model, tokenizer, dic, dicp, maxlen=1024):
             cnode.add(agp)
         action, cnode = cnode.select()
         state.extend(action)
-
+    
+    tmpstr = tokenizer.decode(state, skip_special_tokens=True)
+    inds = find_all_indices(tmpstr, 'Human:')
     # check whether the generation is finished
-    if len(state) > maxlen or action == terminators[0] or action == terminators[1] or terminators[0] in action or terminators[1] in action:
+    if len(state) > maxlen or action == terminators[0] or action == terminators[1] or terminators[0] in action or terminators[1] in action or len(inds) > 1 + 4:
         v, embeding_token, path_n = getv(state, model, tokenizer, dic, dicp, maxlen)
     else:
         v, embeding_token, path_n = getv(state, model, tokenizer, dic, dicp, maxlen)
@@ -427,23 +443,24 @@ def gmeval(batch, model, tokenizer):
     outer loop
     '''
     dic, dicp = {}, {}
-    query = batch['query'][0]
-    query = "[INST] " + query + " [/INST] "
-    # answer = batch['input_ids'][0]
-    # source=batch['source'][0]
+    query = batch['query']
+    # messages   = [
+    #     # {"role": "system", "content": system_prompt},
+    #     {"role": "user",   "content": query}
+    # ]
+    messages = query
 
     if query in qs:
         return None
     
-    instrcot = query
-    # input_ids = tokenizer.apply_chat_template(prompt, add_generation_prompt=True, return_tensors="pt")
-    input_ids = tokenizer(instrcot, return_tensors="pt").input_ids
+    instr = messages
+    # print(instr)
+    input_ids = tokenizer.apply_chat_template(instr, add_generation_prompt=True, return_tensors="pt")
+    # input_ids = tokenizer(instrcot, return_tensors="pt").input_ids
     slen = input_ids.shape[1]
     state = input_ids.tolist()[0]
 
-
     root = node(root=None, parent=None, prior_p=0, step=0)
-
 
     initi = 0
     while 1:
@@ -455,14 +472,18 @@ def gmeval(batch, model, tokenizer):
                 bq, bfn = 0, 0
             if bfn > minT and bq > Vt:
                 break
-
+        act_visits = [(act, node.n) for act, node in root.children.items()]
         try:
-
+            acts, visits = zip(*act_visits)
+            visits = np.array(visits)
+            targetact_probs = (visits) / (visits.sum())
+            visits = visits
+            act_probs = (visits) / (visits.sum())
+            move = acts[int(torch.tensor(act_probs).max(dim=0).indices)]
             move = root.get_max_n_action()
             rootd = node2dic(root, state, tokenizer)
-            save_dict(rootd, '{}_dicv/res_root_{}_zh-{}_{}.json'.format(outdir, args.index, args.language, args.type))
+            save_dict(rootd, f'{outdir}_dicv/rain_{iterator_obj.start}-{iterator_obj.stop}.json')
 
-            move=slice_until_2(move)
             state.extend(move)
             oroot = root
             root = root.children[move]
@@ -479,8 +500,11 @@ def gmeval(batch, model, tokenizer):
         except:
             move = tokenizer.eos_token_id
 
+        tmpstr = tokenizer.decode(state, skip_special_tokens=True)
+        inds = find_all_indices(tmpstr, 'Human:')
 
-
+        if len(inds) > 1 + 4:
+            break
         if len(state) > maxlen:
             break
         if move == terminators[0] or move == terminators[1]:
@@ -489,27 +513,26 @@ def gmeval(batch, model, tokenizer):
             break
 
     raina = tokenizer.decode(state, skip_special_tokens=True)
-    q = batch['query'][0]
-    raina= raina.replace('[INST]', '')
-    raina = raina.replace('[/INST]', '')
-    raina = raina.replace('q', '')
-    raina = raina.strip()
 
     tmp = {'question': query, 'raina': raina}  # ,'source':source, 'pa': pa,
-    save_dict(dic, '{}_dicv/res_{}_zh-{}_{}.json'.format(outdir, args.index, args.language, args.type))
+    save_dict(dic, f'{outdir}_dicv/rain_{iterator_obj.start}-{iterator_obj.stop}.json')
     return tmp
 
 
-terminators = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|eot_id|>")]
+terminators = [
+    tokenizer.eos_token_id,
+    tokenizer.convert_tokens_to_ids("<|end_of_text|>")
+]
 
 def increment():
     global call
     call += 1
 
-for epoch_test, batch_test in tqdm(enumerate(testloader), total=len(testloader)):
+for i in tqdm(range(len(testdataset))):
     call = 0
     start = time.time()
-    tmp= gmeval(batch_test, model, tokenizer)
+    print(testdataset[i])
+    tmp= gmeval(testdataset[i], model, tokenizer)
     if tmp is not None:
         res.append(tmp)
         elapsed = time.time() - start
@@ -517,5 +540,5 @@ for epoch_test, batch_test in tqdm(enumerate(testloader), total=len(testloader))
         tmp['call'] = call
         # {'question': query, 'raina': raina, 'best_answer':best_answer, 'time':elapsed, 'call': call}
     print('-------------------------finish one-------------------------')
-    with open(f'{outdir}/res_{args.index}_zh-{args.language}_{args.type}.json', 'w', encoding='utf-8') as f:
+    with open(f'{outdir}/rain_{iterator_obj.start}-{iterator_obj.stop}.json', 'w', encoding='utf-8') as f:
         f.write(json.dumps(res, ensure_ascii=False))
